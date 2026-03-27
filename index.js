@@ -1,6 +1,7 @@
-require('dotenv').config();
-const fs = require('fs');
-const {
+// index.js
+import 'dotenv/config';
+import fs from 'fs';
+import {
   Client,
   GatewayIntentBits,
   REST,
@@ -13,7 +14,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   InteractionType
-} = require('discord.js');
+} from 'discord.js';
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -72,7 +73,12 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 (async () => {
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  try {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log('✅ Slash commands registered.');
+  } catch (err) {
+    console.error(err);
+  }
 })();
 
 client.once('ready', () => {
@@ -81,26 +87,24 @@ client.once('ready', () => {
 
 // --- Helper to DM admin ---
 async function dmAdmin(message) {
-  const admin = await client.users.fetch(ADMIN_ID);
-  admin.send(message).catch(() => {});
+  try {
+    const admin = await client.users.fetch(ADMIN_ID);
+    await admin.send(message);
+  } catch {}
 }
 
 // --- Interaction handler ---
 client.on('interactionCreate', async interaction => {
-
   const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID);
 
-  // --- Slash commands ---
   if (interaction.isChatInputCommand()) {
 
-    // /confess
     if (interaction.commandName === 'confess') {
       const msg = interaction.options.getString('message');
       const fakeID = getFakeID(interaction.user.id);
       data.confessionCount++;
       const confNum = data.confessionCount;
 
-      // Post anonymous confession with reply button
       const buttonRow = new ActionRowBuilder()
         .addComponents(
           new ButtonBuilder()
@@ -114,7 +118,6 @@ client.on('interactionCreate', async interaction => {
         components: [buttonRow]
       });
 
-      // Create a thread
       const thread = await confMessage.startThread({
         name: `Confession #${confNum}`,
         autoArchiveDuration: 1440
@@ -122,16 +125,12 @@ client.on('interactionCreate', async interaction => {
       data.threads[confNum] = thread.id;
       saveData();
 
-      // DM admin
       dmAdmin(`👀 CONFESSION #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${fakeID}\n\n${msg}`);
 
-      // DM user confirmation
       interaction.user.send(`✅ You sent Confession #${confNum} as User #${fakeID}\n\n"${msg}"`).catch(() => {});
-
       await interaction.reply({ content: `✅ Sent as Confession #${confNum}`, ephemeral: true });
     }
 
-    // /reveal
     if (interaction.commandName === 'reveal') {
       if (interaction.user.id !== ADMIN_ID) return interaction.reply({ content: '❌ Only the admin can use this.', ephemeral: true });
       const fakeid = interaction.options.getInteger('fakeid');
@@ -142,7 +141,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // --- Reply button ---
   if (interaction.isButton() && interaction.customId.startsWith('reply_')) {
     const confNum = parseInt(interaction.customId.split('_')[1]);
     const modal = new ModalBuilder()
@@ -160,7 +158,6 @@ client.on('interactionCreate', async interaction => {
     interaction.showModal(modal);
   }
 
-  // --- Modal submit for reply ---
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId.startsWith('modal_reply_')) {
     const confNum = parseInt(interaction.customId.split('_')[2]);
     const replyMsg = interaction.fields.getTextInputValue('reply_input');
@@ -169,54 +166,43 @@ client.on('interactionCreate', async interaction => {
     const threadId = data.threads[confNum];
     if (!threadId) return interaction.reply({ content: '❌ Confession thread not found.', ephemeral: true });
 
-    // Fetch thread to post reply publicly
     const thread = await client.channels.fetch(threadId);
     await thread.send(`💬 **Reply to Confession #${confNum}**\n👤 User #${senderFakeID}\n\n${replyMsg}`);
-
-    // Admin sees who replied
     dmAdmin(`👀 REPLY to #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${senderFakeID}\n\n${replyMsg}`);
 
-    // DM the original confession poster
-    // Find the original poster of confession #confNum
     const confPosterId = Object.entries(data.threads).find(([num, tid]) => parseInt(num) === confNum)?.[0];
-    let confPosterFakeID = null;
     if (confPosterId) {
-      confPosterFakeID = getFakeID(confPosterId);
       try {
         const confPoster = await client.users.fetch(confPosterId);
+        const confPosterFakeID = getFakeID(confPosterId);
         confPoster.send(`💬 Anonymous #${senderFakeID} replied to your confession:\n\n${replyMsg}`).catch(() => {});
-      } catch (e) {}
+        data.dmChats[senderFakeID] = confPosterFakeID;
+        data.dmChats[confPosterFakeID] = senderFakeID;
+      } catch {}
     }
-
-    // Track DM chat for back-and-forth
-    data.dmChats[senderFakeID] = confPosterFakeID;
-    data.dmChats[confPosterFakeID] = senderFakeID;
     saveData();
-
     interaction.reply({ content: '✅ Your reply was sent anonymously!', ephemeral: true });
   }
 });
 
-// --- DM message forwarding for anonymous chat ---
+// --- DM forwarding ---
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
-  if (message.channel.type !== 1) return; // Only DMs
+  if (message.channel.type !== 1) return;
 
   const senderFakeID = getFakeID(message.author.id);
   const recipientFakeID = data.dmChats[senderFakeID];
-  if (!recipientFakeID) return; // Not part of an anonymous chat
+  if (!recipientFakeID) return;
 
-  // Admin sees the real conversation
   dmAdmin(`👀 DM from ${message.author.tag} (${message.author.id}) as Anonymous #${senderFakeID}:\n${message.content}`);
 
-  // Find real recipient user
   const recipientId = Object.entries(data.users).find(([uid, fid]) => fid === recipientFakeID)?.[0];
   if (!recipientId) return;
 
   try {
     const recipient = await client.users.fetch(recipientId);
     recipient.send(`💬 Anonymous #${senderFakeID}: ${message.content}`).catch(() => {});
-  } catch (e) {}
+  } catch {}
 });
 
 client.login(TOKEN);
