@@ -16,12 +16,14 @@ import {
   InteractionType
 } from 'discord.js';
 
+// --- Environment variables ---
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const CONFESSION_CHANNEL_ID = process.env.CONFESSION_CHANNEL_ID;
 const ADMIN_ID = process.env.ADMIN_ID;
 
+// --- Discord client ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -33,15 +35,26 @@ const client = new Client({
 
 // --- Persistent data ---
 let data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
+
+// Safe load data.json
 if (fs.existsSync('data.json')) {
-  data = JSON.parse(fs.readFileSync('data.json', 'utf8'));
+  try {
+    const fileContent = fs.readFileSync('data.json', 'utf8').trim();
+    if (fileContent) {
+      data = JSON.parse(fileContent);
+    } else {
+      console.log('data.json is empty, initializing fresh data.');
+    }
+  } catch (err) {
+    console.error('Failed to parse data.json, initializing fresh data:', err);
+  }
 }
 
 function saveData() {
   fs.writeFileSync('data.json', JSON.stringify(data, null, 2));
 }
 
-// Get persistent fake ID for a user
+// --- Generate fake ID ---
 function getFakeID(userId) {
   if (!data.users[userId]) {
     const fake = Math.floor(1000 + Math.random() * 9000);
@@ -51,7 +64,7 @@ function getFakeID(userId) {
   return data.users[userId];
 }
 
-// --- Register slash commands ---
+// --- Slash commands registration ---
 const commands = [
   new SlashCommandBuilder()
     .setName('confess')
@@ -72,20 +85,22 @@ const commands = [
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
+
 (async () => {
   try {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log('✅ Slash commands registered.');
   } catch (err) {
-    console.error(err);
+    console.error('Failed to register slash commands:', err);
   }
 })();
 
+// --- Bot ready ---
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// --- Helper to DM admin ---
+// --- DM admin helper ---
 async function dmAdmin(message) {
   try {
     const admin = await client.users.fetch(ADMIN_ID);
@@ -97,21 +112,20 @@ async function dmAdmin(message) {
 client.on('interactionCreate', async interaction => {
   const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID);
 
+  // --- Slash commands ---
   if (interaction.isChatInputCommand()) {
-
     if (interaction.commandName === 'confess') {
       const msg = interaction.options.getString('message');
       const fakeID = getFakeID(interaction.user.id);
       data.confessionCount++;
       const confNum = data.confessionCount;
 
-      const buttonRow = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId(`reply_${confNum}`)
-            .setLabel('Reply anonymously')
-            .setStyle(ButtonStyle.Primary)
-        );
+      const buttonRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`reply_${confNum}`)
+          .setLabel('Reply anonymously')
+          .setStyle(ButtonStyle.Primary)
+      );
 
       const confMessage = await channel.send({
         content: `📩 **Confession #${confNum}**\n👤 User #${fakeID}\n\n${msg}`,
@@ -122,17 +136,17 @@ client.on('interactionCreate', async interaction => {
         name: `Confession #${confNum}`,
         autoArchiveDuration: 1440
       });
+
       data.threads[confNum] = thread.id;
       saveData();
 
       dmAdmin(`👀 CONFESSION #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${fakeID}\n\n${msg}`);
-
       interaction.user.send(`✅ You sent Confession #${confNum} as User #${fakeID}\n\n"${msg}"`).catch(() => {});
       await interaction.reply({ content: `✅ Sent as Confession #${confNum}`, ephemeral: true });
     }
 
     if (interaction.commandName === 'reveal') {
-      if (interaction.user.id !== ADMIN_ID) return interaction.reply({ content: '❌ Only the admin can use this.', ephemeral: true });
+      if (interaction.user.id !== ADMIN_ID) return interaction.reply({ content: '❌ Only admin can use this.', ephemeral: true });
       const fakeid = interaction.options.getInteger('fakeid');
       const realUser = Object.entries(data.users).find(([uid, fid]) => fid === fakeid);
       if (!realUser) return interaction.reply({ content: '❌ Fake ID not found.', ephemeral: true });
@@ -141,6 +155,7 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
+  // --- Reply button ---
   if (interaction.isButton() && interaction.customId.startsWith('reply_')) {
     const confNum = parseInt(interaction.customId.split('_')[1]);
     const modal = new ModalBuilder()
@@ -153,11 +168,11 @@ client.on('interactionCreate', async interaction => {
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(true);
 
-    const row = new ActionRowBuilder().addComponents(input);
-    modal.addComponents(row);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
     interaction.showModal(modal);
   }
 
+  // --- Modal reply submit ---
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId.startsWith('modal_reply_')) {
     const confNum = parseInt(interaction.customId.split('_')[2]);
     const replyMsg = interaction.fields.getTextInputValue('reply_input');
@@ -205,4 +220,5 @@ client.on('messageCreate', async message => {
   } catch {}
 });
 
+// --- Login ---
 client.login(TOKEN);
