@@ -3,6 +3,7 @@ const fs = require('fs');
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -21,37 +22,34 @@ const GUILD_ID = process.env.GUILD_ID;
 const CONFESSION_CHANNEL_ID = process.env.CONFESSION_CHANNEL_ID;
 const ADMIN_ID = process.env.ADMIN_ID;
 
+// --- Initialize client ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages
-  ]
+  ],
+  partials: [Partials.Channel]
 });
 
 // --- Persistent data ---
 let data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
-
-// Auto-create data.json if missing
-if (!fs.existsSync('data.json')) {
-  fs.writeFileSync('data.json', JSON.stringify(data, null, 2));
-  console.log('✅ data.json initialized.');
-} else {
-  try {
-    data = JSON.parse(fs.readFileSync('data.json', 'utf8'));
-  } catch (e) {
-    console.error('⚠️ data.json corrupted. Re-initializing...');
-    data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
-    fs.writeFileSync('data.json', JSON.stringify(data, null, 2));
+try {
+  if (fs.existsSync('data.json')) {
+    const raw = fs.readFileSync('data.json', 'utf8');
+    data = raw ? JSON.parse(raw) : data;
   }
+} catch (err) {
+  console.warn('⚠️ data.json corrupted. Re-initializing...');
+  data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
+  saveData();
 }
 
 function saveData() {
   fs.writeFileSync('data.json', JSON.stringify(data, null, 2));
 }
 
-// Get persistent fake ID for a user
 function getFakeID(userId) {
   if (!data.users[userId]) {
     const fake = Math.floor(1000 + Math.random() * 9000);
@@ -63,6 +61,11 @@ function getFakeID(userId) {
 
 // --- Register slash commands ---
 async function registerCommands() {
+  if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+    console.error('Missing TOKEN, CLIENT_ID, or GUILD_ID in environment!');
+    process.exit(1);
+  }
+
   const commands = [
     new SlashCommandBuilder()
       .setName('confess')
@@ -74,7 +77,7 @@ async function registerCommands() {
       ),
     new SlashCommandBuilder()
       .setName('reveal')
-      .setDescription('Reveal the real user behind a fake ID (admin only)')
+      .setDescription('Reveal the user behind a fake ID (admin only)')
       .addIntegerOption(option =>
         option.setName('fakeid')
           .setDescription('Fake ID to reveal')
@@ -87,29 +90,27 @@ async function registerCommands() {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log('✅ Registered slash commands.');
   } catch (err) {
-    console.error('❌ Failed to register slash commands:', err);
+    console.error('Failed to register slash commands:', err);
   }
 }
 
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
-
-// --- Helper to DM admin ---
+// --- DM admin helper ---
 async function dmAdmin(message) {
   try {
     const admin = await client.users.fetch(ADMIN_ID);
-    admin.send(message).catch(() => {});
+    await admin.send(message);
   } catch {}
 }
 
 // --- Interaction handler ---
 client.on('interactionCreate', async interaction => {
   const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID).catch(() => null);
-  if (!channel) return;
+  if (!channel?.isTextBased()) return;
 
   // --- Slash commands ---
   if (interaction.isChatInputCommand()) {
+    // Defer reply immediately
+    await interaction.deferReply({ ephemeral: true });
 
     // /confess
     if (interaction.commandName === 'confess') {
@@ -118,7 +119,7 @@ client.on('interactionCreate', async interaction => {
       data.confessionCount++;
       const confNum = data.confessionCount;
 
-      // Post anonymous confession with reply button
+      // Post confession
       const buttonRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`reply_${confNum}`)
@@ -131,31 +132,25 @@ client.on('interactionCreate', async interaction => {
         components: [buttonRow]
       });
 
-      // Create a thread
-      const thread = await confMessage.startThread({
-        name: `Confession #${confNum}`,
-        autoArchiveDuration: 1440
-      });
+      const thread = await confMessage.startThread({ name: `Confession #${confNum}`, autoArchiveDuration: 1440 });
       data.threads[confNum] = thread.id;
       saveData();
 
-      // DM admin
       dmAdmin(`👀 CONFESSION #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${fakeID}\n\n${msg}`);
 
-      // DM user confirmation
-      interaction.user.send(`✅ You sent Confession #${confNum} as User #${fakeID}\n\n"${msg}"`).catch(() => {});
+      try { await interaction.user.send(`✅ You sent Confession #${confNum} as User #${fakeID}\n\n"${msg}"`); } catch {}
 
-      await interaction.reply({ content: `✅ Sent as Confession #${confNum}`, ephemeral: true });
+      await interaction.editReply({ content: `✅ Sent as Confession #${confNum}` });
     }
 
     // /reveal
     if (interaction.commandName === 'reveal') {
-      if (interaction.user.id !== ADMIN_ID) return interaction.reply({ content: '❌ Only the admin can use this.', ephemeral: true });
+      if (interaction.user.id !== ADMIN_ID) return interaction.editReply({ content: '❌ Only the admin can use this.' });
       const fakeid = interaction.options.getInteger('fakeid');
       const realUser = Object.entries(data.users).find(([uid, fid]) => fid === fakeid);
-      if (!realUser) return interaction.reply({ content: '❌ Fake ID not found.', ephemeral: true });
+      if (!realUser) return interaction.editReply({ content: '❌ Fake ID not found.' });
       const user = await client.users.fetch(realUser[0]);
-      interaction.reply({ content: `👤 Fake ID #${fakeid} belongs to ${user.tag} (${user.id})`, ephemeral: true });
+      interaction.editReply({ content: `👤 Fake ID #${fakeid} belongs to ${user.tag} (${user.id})` });
     }
   }
 
@@ -172,8 +167,7 @@ client.on('interactionCreate', async interaction => {
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(true);
 
-    const row = new ActionRowBuilder().addComponents(input);
-    modal.addComponents(row);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
     interaction.showModal(modal);
   }
 
@@ -189,42 +183,37 @@ client.on('interactionCreate', async interaction => {
     const thread = await client.channels.fetch(threadId);
     await thread.send(`💬 **Reply to Confession #${confNum}**\n👤 User #${senderFakeID}\n\n${replyMsg}`);
 
-    // Admin sees who replied
     dmAdmin(`👀 REPLY to #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${senderFakeID}\n\n${replyMsg}`);
 
-    // DM the original confession poster
+    // Track DM chat
     const confPosterId = Object.entries(data.threads).find(([num, tid]) => parseInt(num) === confNum)?.[0];
-    let confPosterFakeID = null;
     if (confPosterId) {
-      confPosterFakeID = getFakeID(confPosterId);
+      const confPosterFakeID = getFakeID(confPosterId);
+      data.dmChats[senderFakeID] = confPosterFakeID;
+      data.dmChats[confPosterFakeID] = senderFakeID;
+
       try {
         const confPoster = await client.users.fetch(confPosterId);
         confPoster.send(`💬 Anonymous #${senderFakeID} replied to your confession:\n\n${replyMsg}`).catch(() => {});
       } catch {}
     }
 
-    // Track DM chat for back-and-forth
-    data.dmChats[senderFakeID] = confPosterFakeID;
-    data.dmChats[confPosterFakeID] = senderFakeID;
     saveData();
-
     interaction.reply({ content: '✅ Your reply was sent anonymously!', ephemeral: true });
   }
 });
 
-// --- DM message forwarding for anonymous chat ---
+// --- DM forwarding for anonymous chat ---
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
   if (message.channel.type !== 1) return; // Only DMs
 
   const senderFakeID = getFakeID(message.author.id);
   const recipientFakeID = data.dmChats[senderFakeID];
-  if (!recipientFakeID) return; // Not part of an anonymous chat
+  if (!recipientFakeID) return;
 
-  // Admin sees the real conversation
   dmAdmin(`👀 DM from ${message.author.tag} (${message.author.id}) as Anonymous #${senderFakeID}:\n${message.content}`);
 
-  // Find real recipient user
   const recipientId = Object.entries(data.users).find(([uid, fid]) => fid === recipientFakeID)?.[0];
   if (!recipientId) return;
 
@@ -234,13 +223,13 @@ client.on('messageCreate', async message => {
   } catch {}
 });
 
+// --- Client ready ---
+client.on('clientReady', () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+});
+
 // --- Start bot ---
 (async () => {
-  if (!TOKEN || !CLIENT_ID || !GUILD_ID || !CONFESSION_CHANNEL_ID || !ADMIN_ID) {
-    console.error('❌ Missing required environment variables.');
-    process.exit(1);
-  }
-
   await registerCommands();
   await client.login(TOKEN);
 })();
