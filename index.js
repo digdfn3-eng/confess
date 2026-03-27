@@ -1,9 +1,7 @@
 require('dotenv').config();
-const fs = require('fs');
 const {
   Client,
   GatewayIntentBits,
-  Partials,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -22,47 +20,36 @@ const GUILD_ID = process.env.GUILD_ID;
 const CONFESSION_CHANNEL_ID = process.env.CONFESSION_CHANNEL_ID;
 const ADMIN_ID = process.env.ADMIN_ID;
 
-// --- Initialize client ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages
-  ],
-  partials: [Partials.Channel]
+  ]
 });
 
-// --- Persistent data ---
-let data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
-try {
-  if (fs.existsSync('data.json')) {
-    const raw = fs.readFileSync('data.json', 'utf8');
-    data = raw ? JSON.parse(raw) : data;
-  }
-} catch (err) {
-  console.warn('⚠️ data.json corrupted. Re-initializing...');
-  data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
-  saveData();
-}
-
-function saveData() {
-  fs.writeFileSync('data.json', JSON.stringify(data, null, 2));
-}
+// --- In-memory data ---
+const data = { users: {}, threads: {}, confessionCount: 0, dmChats: {} };
 
 function getFakeID(userId) {
   if (!data.users[userId]) {
-    const fake = Math.floor(1000 + Math.random() * 9000);
-    data.users[userId] = fake;
-    saveData();
+    data.users[userId] = Math.floor(1000 + Math.random() * 9000);
   }
   return data.users[userId];
+}
+
+async function dmAdmin(message) {
+  try {
+    const admin = await client.users.fetch(ADMIN_ID);
+    await admin.send(message);
+  } catch {}
 }
 
 // --- Register slash commands ---
 async function registerCommands() {
   if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-    console.error('Missing TOKEN, CLIENT_ID, or GUILD_ID in environment!');
+    console.error('Missing TOKEN, CLIENT_ID, or GUILD_ID!');
     process.exit(1);
   }
 
@@ -86,20 +73,8 @@ async function registerCommands() {
   ].map(cmd => cmd.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
-  try {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log('✅ Registered slash commands.');
-  } catch (err) {
-    console.error('Failed to register slash commands:', err);
-  }
-}
-
-// --- DM admin helper ---
-async function dmAdmin(message) {
-  try {
-    const admin = await client.users.fetch(ADMIN_ID);
-    await admin.send(message);
-  } catch {}
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  console.log('✅ Registered slash commands.');
 }
 
 // --- Interaction handler ---
@@ -107,19 +82,15 @@ client.on('interactionCreate', async interaction => {
   const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID).catch(() => null);
   if (!channel?.isTextBased()) return;
 
-  // --- Slash commands ---
   if (interaction.isChatInputCommand()) {
-    // Defer reply immediately
     await interaction.deferReply({ ephemeral: true });
 
-    // /confess
     if (interaction.commandName === 'confess') {
       const msg = interaction.options.getString('message');
       const fakeID = getFakeID(interaction.user.id);
       data.confessionCount++;
       const confNum = data.confessionCount;
 
-      // Post confession
       const buttonRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`reply_${confNum}`)
@@ -134,7 +105,6 @@ client.on('interactionCreate', async interaction => {
 
       const thread = await confMessage.startThread({ name: `Confession #${confNum}`, autoArchiveDuration: 1440 });
       data.threads[confNum] = thread.id;
-      saveData();
 
       dmAdmin(`👀 CONFESSION #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${fakeID}\n\n${msg}`);
 
@@ -143,7 +113,6 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply({ content: `✅ Sent as Confession #${confNum}` });
     }
 
-    // /reveal
     if (interaction.commandName === 'reveal') {
       if (interaction.user.id !== ADMIN_ID) return interaction.editReply({ content: '❌ Only the admin can use this.' });
       const fakeid = interaction.options.getInteger('fakeid');
@@ -154,7 +123,6 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // --- Reply button ---
   if (interaction.isButton() && interaction.customId.startsWith('reply_')) {
     const confNum = parseInt(interaction.customId.split('_')[1]);
     const modal = new ModalBuilder()
@@ -171,7 +139,6 @@ client.on('interactionCreate', async interaction => {
     interaction.showModal(modal);
   }
 
-  // --- Modal submit for reply ---
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId.startsWith('modal_reply_')) {
     const confNum = parseInt(interaction.customId.split('_')[2]);
     const replyMsg = interaction.fields.getTextInputValue('reply_input');
@@ -185,28 +152,14 @@ client.on('interactionCreate', async interaction => {
 
     dmAdmin(`👀 REPLY to #${confNum}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${senderFakeID}\n\n${replyMsg}`);
 
-    // Track DM chat
-    const confPosterId = Object.entries(data.threads).find(([num, tid]) => parseInt(num) === confNum)?.[0];
-    if (confPosterId) {
-      const confPosterFakeID = getFakeID(confPosterId);
-      data.dmChats[senderFakeID] = confPosterFakeID;
-      data.dmChats[confPosterFakeID] = senderFakeID;
-
-      try {
-        const confPoster = await client.users.fetch(confPosterId);
-        confPoster.send(`💬 Anonymous #${senderFakeID} replied to your confession:\n\n${replyMsg}`).catch(() => {});
-      } catch {}
-    }
-
-    saveData();
     interaction.reply({ content: '✅ Your reply was sent anonymously!', ephemeral: true });
   }
 });
 
-// --- DM forwarding for anonymous chat ---
+// --- DM forwarding ---
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
-  if (message.channel.type !== 1) return; // Only DMs
+  if (message.channel.type !== 1) return;
 
   const senderFakeID = getFakeID(message.author.id);
   const recipientFakeID = data.dmChats[senderFakeID];
@@ -223,7 +176,7 @@ client.on('messageCreate', async message => {
   } catch {}
 });
 
-// --- Client ready ---
+// --- Ready event ---
 client.on('clientReady', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
