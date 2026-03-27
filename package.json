@@ -1,7 +1,7 @@
 {
   "name": "discord-confession-bot",
   "version": "1.0.0",
-  "description": "Anonymous confession bot for Discord with fake IDs and reply threads",
+  "description": "Anonymous confession bot for Discord without persistent storage",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
