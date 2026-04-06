@@ -11,16 +11,15 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  InteractionType,
-  ChannelType
+  InteractionType
 } = require('discord.js');
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const CONFESSION_CHANNEL_ID = process.env.CONFESSION_CHANNEL_ID;
+const EXPOSE_CHANNEL_ID = '1490140096517767268'; // channel for exposes
 const ADMIN_ID = process.env.ADMIN_ID;
-const EXPOSE_CHANNEL_ID = process.env.EXPOSE_CHANNEL_ID; // For anonymous exposes
 
 const client = new Client({
   intents: [
@@ -33,13 +32,12 @@ const client = new Client({
 
 // --- In-memory data ---
 const data = {
-  confessions: {},        // confessionNum: { userId, message, replies: [] }
-  confessionCount: 0,
-  blacklisted: new Set(),
-  replyCount: 0
+  confessions: {}, // confessionID -> {userId, message, replies: [{userId,msg,replyTo}]}
+  blacklist: new Set(),
+  confessionCount: 0
 };
 
-// --- Utils ---
+// --- Helper functions ---
 function getRandomID() {
   return Math.floor(1000 + Math.random() * 9000);
 }
@@ -58,21 +56,13 @@ async function registerCommands() {
       .setName('confess')
       .setDescription('Send an anonymous confession'),
     new SlashCommandBuilder()
-      .setName('reveal')
-      .setDescription('Reveal the user behind a confession/reply')
-      .addIntegerOption(option => option.setName('id').setDescription('Confession or reply ID').setRequired(true)),
-    new SlashCommandBuilder()
-      .setName('blacklist')
-      .setDescription('Blacklist a user from confessing')
-      .addUserOption(option => option.setName('user').setDescription('User to blacklist').setRequired(true)),
-    new SlashCommandBuilder()
       .setName('unblacklist')
-      .setDescription('Remove a user from blacklist')
+      .setDescription('Unblacklist a user')
       .addUserOption(option => option.setName('user').setDescription('User to unblacklist').setRequired(true)),
     new SlashCommandBuilder()
       .setName('stats')
       .setDescription('Show confession stats')
-  ].map(c => c.toJSON());
+  ].map(cmd => cmd.toJSON());
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
@@ -81,19 +71,15 @@ async function registerCommands() {
 
 // --- Interaction handler ---
 client.on('interactionCreate', async interaction => {
-  const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID).catch(() => null);
-  if (!channel?.isTextBased()) return;
 
-  // --- Slash Commands ---
+  // --- Slash commands ---
   if (interaction.isChatInputCommand()) {
-    await interaction.deferReply({ ephemeral: true });
 
     if (interaction.commandName === 'confess') {
-      if (data.blacklisted.has(interaction.user.id)) {
-        return interaction.editReply('❌ You are blacklisted from confessing.');
+      if (data.blacklist.has(interaction.user.id)) {
+        return interaction.reply({ content: '❌ You are blacklisted.', flags: 64 });
       }
 
-      // Show modal
       const modal = new ModalBuilder()
         .setCustomId('confess_modal')
         .setTitle('Anonymous Confession');
@@ -108,118 +94,118 @@ client.on('interactionCreate', async interaction => {
       return interaction.showModal(modal);
     }
 
-    if (interaction.commandName === 'reveal') {
-      if (interaction.user.id !== ADMIN_ID) return interaction.editReply('❌ Only admin.');
-      const id = interaction.options.getInteger('id');
-      let entry = Object.entries(data.confessions).find(([num, conf]) => conf.randomID === id);
-      if (!entry) {
-        // search replies
-        for (const [num, conf] of Object.entries(data.confessions)) {
-          const reply = conf.replies.find(r => r.randomID === id);
-          if (reply) entry = [num, reply];
-        }
-      }
-      if (!entry) return interaction.editReply('❌ ID not found.');
-      const user = await client.users.fetch(entry[1]?.userId || entry[1]?.userId || entry[1].userId);
-      return interaction.editReply(`👤 ID ${id} belongs to ${user.tag}`);
-    }
-
-    if (interaction.commandName === 'blacklist') {
-      if (interaction.user.id !== ADMIN_ID) return interaction.editReply('❌ Only admin.');
-      const user = interaction.options.getUser('user');
-      data.blacklisted.add(user.id);
-      return interaction.editReply(`✅ Blacklisted ${user.tag}`);
-    }
-
     if (interaction.commandName === 'unblacklist') {
-      if (interaction.user.id !== ADMIN_ID) return interaction.editReply('❌ Only admin.');
       const user = interaction.options.getUser('user');
-      data.blacklisted.delete(user.id);
-      return interaction.editReply(`✅ Unblacklisted ${user.tag}`);
+      data.blacklist.delete(user.id);
+      return interaction.reply({ content: `✅ ${user.tag} unblacklisted.`, flags: 64 });
     }
 
     if (interaction.commandName === 'stats') {
-      const total = Object.keys(data.confessions).length;
-      const replies = Object.values(data.confessions).reduce((acc, c) => acc + c.replies.length, 0);
-      return interaction.editReply(`📊 Total confessions: ${total}\n💬 Total replies: ${replies}`);
+      return interaction.reply({ content: `📄 Total confessions: ${data.confessionCount}`, flags: 64 });
     }
   }
 
-  // --- Modal Submit ---
-  if (interaction.type === InteractionType.ModalSubmit) {
-    if (interaction.customId === 'confess_modal') {
-      const msg = interaction.fields.getTextInputValue('confess_input');
-      const randomID = getRandomID();
-      data.confessionCount++;
-      const confNum = data.confessionCount;
+  // --- Modal submit ---
+  if (interaction.type === InteractionType.ModalSubmit && interaction.customId === 'confess_modal') {
+    const msg = interaction.fields.getTextInputValue('confess_input');
+    const confessionID = ++data.confessionCount;
+    const fakeID = getRandomID();
 
-      data.confessions[confNum] = { userId: interaction.user.id, message: msg, randomID, replies: [] };
+    data.confessions[confessionID] = { userId: interaction.user.id, message: msg, replies: [] };
 
-      const replyBtn = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`reply_${confNum}`).setLabel('Reply').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId(`report_${confNum}`).setLabel('Report').setStyle(ButtonStyle.Danger)
-      );
+    const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID);
+    const reportButton = new ButtonBuilder()
+      .setCustomId(`report_${confessionID}`)
+      .setLabel('Report')
+      .setStyle(ButtonStyle.Danger);
 
-      await interaction.editReply({ content: `✅ Confession #${confNum} sent as ID ${randomID}`, ephemeral: true });
+    const replyButton = new ButtonBuilder()
+      .setCustomId(`reply_${confessionID}_0`)
+      .setLabel('Reply')
+      .setStyle(ButtonStyle.Primary);
 
-      const confMsg = await channel.send({ content: `📩 **Confession #${confNum}**\nID: ${randomID}\n\n${msg}`, components: [replyBtn] });
-      dmAdmin(`Confession #${confNum} from ${interaction.user.tag} (${interaction.user.id})\n${msg}`);
-    }
+    await channel.send({
+      content: `📩 **Confession #${confessionID}**\n👤 User #${fakeID}\n\n${msg}`,
+      components: [new ActionRowBuilder().addComponents(replyButton, reportButton)]
+    });
+
+    dmAdmin(`👀 CONFESSION #${confessionID}\nFrom: ${interaction.user.tag} (${interaction.user.id})\nFake ID: #${fakeID}\n\n${msg}`);
+    return interaction.reply({ content: `✅ Sent as Confession #${confessionID}`, flags: 64 });
   }
 
-  // --- Button Clicks ---
+  // --- Button interactions ---
   if (interaction.isButton()) {
-    const [action, confNum] = interaction.customId.split('_');
-    const conf = data.confessions[confNum];
-    if (!conf) return interaction.reply({ content: '❌ Confession not found.', ephemeral: true });
+    const [action, confessionID, replyIndex] = interaction.customId.split('_');
+    const confession = data.confessions[confessionID];
+    if (!confession) return interaction.reply({ content: '❌ Confession not found.', flags: 64 });
 
+    // Reply button
     if (action === 'reply') {
-      const modal = new ModalBuilder().setCustomId(`reply_modal_${confNum}`).setTitle(`Reply to Confession #${confNum}`);
-      const input = new TextInputBuilder().setCustomId('reply_input').setLabel('Reply').setStyle(TextInputStyle.Paragraph).setRequired(true);
+      const modal = new ModalBuilder()
+        .setCustomId(`reply_modal_${confessionID}_${replyIndex}`)
+        .setTitle(`Reply to Confession #${confessionID}`);
+
+      const input = new TextInputBuilder()
+        .setCustomId('reply_input')
+        .setLabel('Your anonymous reply')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true);
+
       modal.addComponents(new ActionRowBuilder().addComponents(input));
       return interaction.showModal(modal);
     }
 
+    // Report button
     if (action === 'report') {
-      if (interaction.user.id === ADMIN_ID) return;
-      const exposedMsg = `📢 Anonymous expose in chat\nID: ${conf.randomID}\nConfession: "${conf.message}"\nAhaaha dont do this again.`;
+      const userId = confession.userId;
+      data.blacklist.add(userId);
       const exposeChannel = await client.channels.fetch(EXPOSE_CHANNEL_ID);
-      await exposeChannel.send({ content: exposedMsg });
-      return interaction.reply({ content: '✅ Report sent', ephemeral: true });
+      await exposeChannel.send(`📢 **Expose Confession #${confessionID}**\nAhaaha, don't do this again! <@${userId}>`);
+      return interaction.reply({ content: `✅ Reported and blacklisted.`, flags: 64 });
     }
   }
 
-  // --- Reply Modal Submit ---
+  // --- Reply modal submit ---
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId.startsWith('reply_modal_')) {
-    const confNum = interaction.customId.split('_')[2];
-    const conf = data.confessions[confNum];
-    if (!conf) return interaction.reply({ content: '❌ Confession not found', ephemeral: true });
+    const parts = interaction.customId.split('_');
+    const confessionID = parts[2];
+    const replyTo = parseInt(parts[3]);
+
     const replyMsg = interaction.fields.getTextInputValue('reply_input');
-    const randomID = getRandomID();
-    data.replyCount++;
-    const replyEntry = { userId: interaction.user.id, message: replyMsg, randomID, replies: [] };
-    conf.replies.push(replyEntry);
+    const confession = data.confessions[confessionID];
+    if (!confession) return interaction.reply({ content: '❌ Confession not found.', flags: 64 });
 
-    const replyBtn = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`replyreply_${confNum}_${conf.replies.length-1}`).setLabel('Reply').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`reportreply_${confNum}_${conf.replies.length-1}`).setLabel('Report').setStyle(ButtonStyle.Danger)
-    );
+    confession.replies.push({ userId: interaction.user.id, msg: replyMsg, replyTo });
+    const replyIndex = confession.replies.length;
 
-    const confChannel = await client.channels.fetch(CONFESSION_CHANNEL_ID);
-    await confChannel.send({ content: `💬 Reply to Confession #${confNum}\nID: ${randomID}\n${replyMsg}`, components: [replyBtn] });
+    const channel = await client.channels.fetch(CONFESSION_CHANNEL_ID);
+    const reportButton = new ButtonBuilder()
+      .setCustomId(`report_${confessionID}`)
+      .setLabel('Report')
+      .setStyle(ButtonStyle.Danger);
 
-    dmAdmin(`Reply to Confession #${confNum} from ${interaction.user.tag} (${interaction.user.id})\n${replyMsg}`);
+    const replyButton = new ButtonBuilder()
+      .setCustomId(`reply_${confessionID}_${replyIndex}`)
+      .setLabel('Reply')
+      .setStyle(ButtonStyle.Primary);
 
-    return interaction.reply({ content: '✅ Reply sent', ephemeral: true });
+    await channel.send({
+      content: `💬 **Reply to Confession #${confessionID} (Reply #${replyIndex})**\n👤 User #${getRandomID()}\n\n${replyMsg}`,
+      components: [new ActionRowBuilder().addComponents(replyButton, reportButton)]
+    });
+
+    dmAdmin(`👀 REPLY to #${confessionID}\nFrom: ${interaction.user.tag} (${interaction.user.id})\n\n${replyMsg}`);
+    return interaction.reply({ content: '✅ Your reply was sent anonymously!', flags: 64 });
   }
+
 });
 
-// --- Ready ---
-client.once('ready', () => {
+// --- Client ready ---
+client.once('clientReady', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// --- Start ---
+// --- Start bot ---
 (async () => {
   await registerCommands();
   await client.login(TOKEN);
